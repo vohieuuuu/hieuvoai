@@ -24,6 +24,10 @@ logging.getLogger("seleniumwire").setLevel(logging.WARNING)
 
 def chrome_options_func(profile_dir):
     from seleniumwire import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    import os
+    
     options = webdriver.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
     options.add_argument("--profile-directory=Default")
@@ -39,10 +43,16 @@ def chrome_options_func(profile_dir):
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-software-rasterizer")
-    # options.add_argument("--headless=new")  # Bật dòng này nếu muốn test headless
     
-    # Thêm service configuration
-    service = Service(ChromeDriverManager().install())
+    # Thêm các options để tránh lỗi Win32
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    # Sử dụng ChromeDriver từ thư mục .wdm
+    driver_path = os.path.join(os.environ['USERPROFILE'], '.wdm', 'drivers', 'chromedriver', 'win64', '137.0.7151.70', 'chromedriver-win32', 'chromedriver.exe')
+    service = Service(executable_path=driver_path)
+    
     return options, service
 
 # Khởi tạo standby pool với login_func khi server khởi động
