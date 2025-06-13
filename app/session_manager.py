@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from seleniumwire import webdriver
+import undetected_chromedriver as uc
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from threading import Lock
@@ -35,14 +35,9 @@ pool_lock = Lock()
 logger = logging.getLogger(__name__)
 
 def chrome_options_func(profile_dir):
-    from seleniumwire import webdriver
-    options = webdriver.ChromeOptions()
+    options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
     options.add_argument("--profile-directory=Default")
-    # options.add_argument("--disable-gpu")  # thử bỏ
-    # options.add_argument("--disable-dev-shm-usage")  # thử bỏ
-    # options.add_argument("--no-sandbox")  # thử bỏ
-    options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
@@ -51,30 +46,20 @@ def chrome_options_func(profile_dir):
     options.add_argument("--log-level=3")
     options.add_argument("--silent")
     options.add_argument("--window-size=300,300")
-    # options.add_argument("--remote-debugging-port=0")  # thử bỏ
     return options
 
 def _create_entry(email, password, chrome_options_func, login_func=None, standby=True):
     profile_dir = os.path.join(PROFILE_BASE_DIR, email)
     os.makedirs(profile_dir, exist_ok=True)
-    options, service = chrome_options_func(profile_dir)
-    options.add_argument("--remote-debugging-port=0")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-background-timer-throttling")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    options.add_argument("--disable-breakpad")
-    options.add_argument("--disable-component-extensions-with-background-pages")
-    options.add_argument("--disable-features=TranslateUI")
-    options.add_argument("--disable-ipc-flooding-protection")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
-    options.add_argument("--force-color-profile=srgb")
-    options.add_argument("--metrics-recording-only")
-    options.add_argument("--mute-audio")
+    options = chrome_options_func(profile_dir)
     
-    driver = webdriver.Chrome(service=service, options=options)
+    # Sử dụng undetected_chromedriver
+    driver = uc.Chrome(
+        options=options,
+        driver_executable_path=ChromeDriverManager().install(),
+        version_main=None  # Tự động phát hiện phiên bản Chrome
+    )
+    
     if login_func:
         driver.get("https://accounts.google.com/")
         login_func(driver, email, password)
@@ -88,8 +73,8 @@ def _create_entry(email, password, chrome_options_func, login_func=None, standby
         "conversation_id": None if standby else "",
         "in_use": not standby,
         "standby": standby,
-        "has_been_active": False,  # Mới tạo nên chưa active
-        "last_state_change": now  # Thời điểm tạo là thời điểm chuyển trạng thái đầu tiên
+        "has_been_active": False,
+        "last_state_change": now
     }
 
 def _init_standby_pool(chrome_options_func, login_func=None):
@@ -101,7 +86,7 @@ def _init_standby_pool(chrome_options_func, login_func=None):
             entry = _create_entry(acc["email"], acc["password"], chrome_options_func, login_func, standby=True)
             standby_pool.append(entry)
             logger.info(f"[INIT] Standby Chrome created for email={acc['email']}")
-            time.sleep(2)  # Thêm delay giữa các lần tạo Chrome
+            time.sleep(2)
         except Exception as e:
             logger.error(f"[INIT][ERROR] Error creating standby driver for {acc['email']}: {str(e)}")
     logger.info(f"[INIT] Standby Chrome pool size: {len(standby_pool)}")
@@ -111,34 +96,31 @@ def get_driver_for_conversation(conversation_id, chrome_options_func, login_func
     now = datetime.now()
     with pool_lock:
         logger.info(f"[POOL] Standby pool size: {len(standby_pool)}, Active pool size: {len(active_pool)}")
-        # Nếu conversation_id đã có driver active
         if conversation_id in active_pool:
             entry = active_pool[conversation_id]
             entry["last_active"] = now
             logger.info(f"[ACTIVE] Reusing active Chrome for conversation_id={conversation_id}, email={entry['email']}")
             return entry["driver"], entry["email"], entry["password"]
         
-        # Nếu chưa có, lấy standby từ pool
         if standby_pool:
             entry = standby_pool.pop(0)
             entry["conversation_id"] = conversation_id
             entry["in_use"] = True
             entry["standby"] = False
             entry["last_active"] = now
-            entry["has_been_active"] = True  # Đánh dấu đã từng active
-            entry["last_state_change"] = now  # Cập nhật thời điểm chuyển trạng thái
+            entry["has_been_active"] = True
+            entry["last_state_change"] = now
             active_pool[conversation_id] = entry
             logger.info(f"[STANDBY] Assigning standby Chrome to conversation_id={conversation_id}, email={entry['email']}. Standby left: {len(standby_pool)}")
             return entry["driver"], entry["email"], entry["password"]
         
-        # Nếu không còn standby, tạo mới nếu còn email chưa dùng
         used_emails = {e["email"] for e in active_pool.values()}
         for acc in EMAIL_ACCOUNTS:
             if acc["email"] not in used_emails:
                 try:
                     entry = _create_entry(acc["email"], acc["password"], chrome_options_func, login_func, standby=False)
                     entry["conversation_id"] = conversation_id
-                    entry["has_been_active"] = True  # Tạo mới cho active nên đánh dấu luôn
+                    entry["has_been_active"] = True
                     active_pool[conversation_id] = entry
                     logger.info(f"[NEW] Created new Chrome for conversation_id={conversation_id}, email={entry['email']}")
                     return entry["driver"], entry["email"], entry["password"]
@@ -152,7 +134,6 @@ def cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=None, login
     global standby_pool
     now = datetime.now()
     with pool_lock:
-        # Cleanup active drivers
         to_remove = []
         for cid, entry in active_pool.items():
             if entry["last_active"] and (now - entry["last_active"]).total_seconds() > timeout_minutes * 60:
@@ -161,11 +142,10 @@ def cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=None, login
                 except:
                     pass
                 to_remove.append(cid)
-                # Nếu profile đã từng active, tạo lại và chuyển về standby
                 if entry["has_been_active"]:
                     try:
                         new_entry = _create_entry(entry["email"], entry["password"], chrome_options_func, login_func, standby=True)
-                        new_entry["has_been_active"] = True  # Giữ nguyên trạng thái đã từng active
+                        new_entry["has_been_active"] = True
                         new_entry["last_state_change"] = now
                         standby_pool.append(new_entry)
                         logger.info(f"[CLEANUP] Reset and moved to standby: {entry['email']}")
@@ -175,7 +155,6 @@ def cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=None, login
         for cid in to_remove:
             del active_pool[cid]
         
-        # Cleanup standby pool - chỉ reset những profile đã từng active
         new_standby_pool = []
         for entry in standby_pool:
             if entry["has_been_active"] and (now - entry["last_state_change"]).total_seconds() > timeout_minutes * 60:
@@ -193,7 +172,6 @@ def cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=None, login
         
         standby_pool = new_standby_pool
         
-        # Tạo thêm standby cho các email chưa dùng
         used_emails = {e["email"] for e in active_pool.values()}
         standby_emails = {e["email"] for e in standby_pool}
         for acc in EMAIL_ACCOUNTS:
@@ -203,17 +181,4 @@ def cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=None, login
                     standby_pool.append(entry)
                     logger.info(f"[CLEANUP] Created new standby profile: {acc['email']}")
                 except Exception as e:
-                    logger.error(f"[CLEANUP][ERROR] Failed to create standby profile {acc['email']}: {str(e)}")
-
-def send_prompt_and_get_response(driver, prompt, query_id):
-    logger.info(f"Current URL: {driver.current_url}")
-    logger.info(f"Prompt to send: {prompt}")
-    driver.save_screenshot(f"before_send_prompt_{query_id}.png")
-    box = WebDriverWait(driver, 30).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, PROMPT_SELECTOR))
-    )
-    box.clear()
-    box.send_keys(prompt)
-    box.send_keys(Keys.ENTER)
-    logger.info("Prompt sent successfully")
-    # ... tiếp tục lấy kết quả ... 
+                    logger.error(f"[CLEANUP][ERROR] Failed to create standby profile {acc['email']}: {str(e)}") 

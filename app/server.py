@@ -5,13 +5,15 @@ import threading
 import time
 from .config import MAX_WORKERS, QUEUE_TIMEOUT
 from .utils import generate_conversation_id, setup_logging
-from .session_manager import get_driver_for_conversation, cleanup_inactive_drivers, _init_standby_pool
+from .session_manager import get_driver_for_conversation, cleanup_inactive_drivers, _init_standby_pool, chrome_options_func
 from .selenium_worker import send_prompt_and_get_response, google_login_if_needed
 import logging
 import os
 import shutil
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from functools import lru_cache
+from threading import Thread
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -21,6 +23,23 @@ logger = setup_logging()
 CLEANUP_INTERVAL = 900  # 15 phút
 
 logging.getLogger("seleniumwire").setLevel(logging.WARNING)
+
+# Cấu hình logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# Cache cho các câu hỏi thường gặp
+@lru_cache(maxsize=100)
+def get_cached_response(question):
+    return None
 
 def chrome_options_func(profile_dir):
     from seleniumwire import webdriver
@@ -75,35 +94,71 @@ try:
 except Exception as e:
     print(f"[CLEANUP][ERROR] {e}")
 
-@app.route("/query", methods=["POST"])
-def query_api():
-    data = request.get_json(silent=True) or {}
-    prompt = data.get("prompt", "").strip()
-    conversation_id = data.get("conversation_id")
-    if not prompt:
-        return jsonify(error="Empty prompt"), 400
-    
-    # Tạo query_id duy nhất cho mỗi request
-    query_id = f"{conversation_id}_{int(time.time())}"
-    
-    # Nếu không có conversation_id, tạo mới
-    new_conversation = False
-    if not conversation_id:
-        conversation_id = generate_conversation_id()
-        new_conversation = True
-    
-    # Lấy hoặc tạo driver cho conversation_id
-    driver, email, password = get_driver_for_conversation(
-        conversation_id, chrome_options_func, login_func=google_login_if_needed
-    )
-    
-    # Gửi prompt và lấy kết quả với query_id
-    answer = send_prompt_and_get_response(driver, prompt, query_id)
-    
-    response = {"answer": answer, "conversation_id": conversation_id, "email": email}
-    if new_conversation:
-        response["new_conversation"] = True
-    return jsonify(response), 200
+def cleanup_task():
+    while True:
+        try:
+            cleanup_inactive_drivers(timeout_minutes=15, chrome_options_func=chrome_options_func)
+            time.sleep(60)  # Cleanup mỗi phút
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {str(e)}")
+            time.sleep(60)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5678, debug=False) 
+@app.route('/ask', methods=['POST'])
+def ask():
+    try:
+        data = request.get_json()
+        if not data or 'question' not in data:
+            return jsonify({"error": "Missing question in request"}), 400
+
+        question = data['question']
+        conversation_id = data.get('conversation_id', 'default')
+
+        # Kiểm tra cache
+        cached_response = get_cached_response(question)
+        if cached_response:
+            logger.info(f"[CACHE] Using cached response for question: {question[:50]}...")
+            return jsonify({"response": cached_response})
+
+        # Lấy driver từ pool
+        try:
+            driver, email, password = get_driver_for_conversation(
+                conversation_id,
+                chrome_options_func,
+                None  # Không cần login_func vì đã có profile
+            )
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to get driver: {str(e)}")
+            return jsonify({"error": "Failed to initialize browser"}), 500
+
+        # Gửi câu hỏi và lấy câu trả lời
+        try:
+            response = send_prompt_and_get_response(driver, question)
+            if response:
+                # Cache câu trả lời
+                get_cached_response.cache_clear()  # Xóa cache cũ
+                get_cached_response(question)  # Thêm vào cache mới
+                return jsonify({"response": response})
+            else:
+                return jsonify({"error": "No response received"}), 500
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to get response: {str(e)}")
+            return jsonify({"error": "Failed to get response"}), 500
+
+    except Exception as e:
+        logger.error(f"[ERROR] Unexpected error: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"})
+
+if __name__ == '__main__':
+    # Khởi tạo pool Chrome
+    _init_standby_pool(chrome_options_func)
+    
+    # Bắt đầu cleanup task
+    cleanup_thread = Thread(target=cleanup_task, daemon=True)
+    cleanup_thread.start()
+    
+    # Chạy server
+    app.run(host='0.0.0.0', port=5000) 
