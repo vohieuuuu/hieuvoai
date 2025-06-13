@@ -7,8 +7,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 from .config import PROMPT_SELECTOR, LOADING_CSS, TIMEOUT, ELEMENT_WAIT_TIMEOUT, CAPTCHA_SELECTORS, TARGET_URL
 import logging
+import json
+import re
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Selectors
+PROMPT_SELECTOR = "textarea[placeholder='Ask a question or enter a prompt here']"
+RESPONSE_SELECTOR = "div.markdown-content"
+LOADING_SELECTOR = "div.loading-indicator"  # Thêm selector cho loading indicator
 
 # Hàm kiểm tra captcha
 def is_captcha_present(drv):
@@ -50,136 +58,101 @@ def get_message_elements(drv):
         logger.error(f"Error getting answer messages: {str(e)}")
         return []
 
-def send_prompt_and_get_response(drv, prompt):
-    # Đảm bảo driver đang ở đúng trang public
-    if not drv.current_url.startswith(TARGET_URL):
-        drv.get(TARGET_URL)
-        WebDriverWait(drv, ELEMENT_WAIT_TIMEOUT).until(
+def wait_for_response(driver, timeout=30):
+    """Đợi cho đến khi có response mới"""
+    start_time = time.time()
+    last_response = None
+    
+    while time.time() - start_time < timeout:
+        try:
+            # Đợi loading indicator biến mất
+            WebDriverWait(driver, 5).until_not(
+                EC.presence_of_element_located((By.CSS_SELECTOR, LOADING_SELECTOR))
+            )
+            
+            # Lấy response hiện tại
+            response_elements = driver.find_elements(By.CSS_SELECTOR, RESPONSE_SELECTOR)
+            if response_elements:
+                current_response = response_elements[-1].text.strip()
+                if current_response != last_response:
+                    # Đợi thêm 1 giây để đảm bảo response đã hoàn chỉnh
+                    time.sleep(1)
+                    return current_response
+            last_response = current_response if response_elements else None
+        except Exception as e:
+            logger.debug(f"Waiting for response: {str(e)}")
+        time.sleep(0.5)
+    
+    raise TimeoutError("Timeout waiting for response")
+
+def send_prompt_and_get_response(driver, prompt, query_id=None):
+    """
+    Gửi prompt và lấy response tương ứng
+    query_id: ID duy nhất cho mỗi request để tracking
+    """
+    try:
+        logger.info(f"[{query_id}] Sending prompt: {prompt}")
+        logger.info(f"[{query_id}] Current URL: {driver.current_url}")
+        
+        # Đợi và tìm prompt box
+        box = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, PROMPT_SELECTOR))
         )
-    logger.info(f"Processing prompt: {prompt[:50]}...")
-    wait = WebDriverWait(drv, ELEMENT_WAIT_TIMEOUT)
-    # Tìm và gửi prompt
-    box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, PROMPT_SELECTOR)))
-    wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, PROMPT_SELECTOR)))
-    box.clear()
-    logger.info("Sending prompt")
-    for char in prompt:
-        box.send_keys(char)
-        time.sleep(0.05)
-    box.send_keys(Keys.ENTER)
-    logger.info("Prompt sent successfully")
-    # Đợi loading
-    try:
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, LOADING_CSS)))
-        wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, LOADING_CSS)))
-    except Exception:
-        logger.warning("Loading indicator timeout")
-    # Đợi message trả lời
-    start_time = time.time()
-    last_messages = []
-    stable_time = 0
-    STABLE_DURATION = 2
-    while time.time() - start_time < TIMEOUT:
-        messages = get_message_elements(drv)
-        texts = [m[1] for m in messages]
-        if texts:
-            if last_messages == texts:
-                stable_time += 0.5
-            else:
-                stable_time = 0
-                last_messages = texts
-            if stable_time >= STABLE_DURATION:
-                logger.info("Response stabilized")
-                final_text = "\n".join(texts)
-                logger.info(f"Final message text: {repr(final_text)}")
-                return final_text
-        time.sleep(0.5)
-    logger.warning("Timeout waiting for response")
-    return ""
+        
+        # Clear và gửi prompt
+        box.clear()
+        box.send_keys(prompt)
+        box.send_keys(Keys.ENTER)
+        
+        # Đánh dấu thời điểm gửi prompt
+        send_time = datetime.now()
+        logger.info(f"[{query_id}] Prompt sent at {send_time}")
+        
+        # Đợi và lấy response
+        response = wait_for_response(driver)
+        response_time = datetime.now()
+        
+        # Log thông tin timing
+        time_diff = (response_time - send_time).total_seconds()
+        logger.info(f"[{query_id}] Response received after {time_diff} seconds")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"[{query_id}] Error in send_prompt_and_get_response: {str(e)}")
+        raise
 
-def google_login_if_needed(driver, email, password, timeout=60):
-    from .config import TARGET_URL
+def google_login_if_needed(driver, email, password):
+    """Login vào Google nếu cần"""
     try:
-        # Nếu đã đăng nhập rồi, vẫn phải chuyển hướng đến TARGET_URL
-        if "accounts.google.com" not in driver.current_url and "ServiceLogin" not in driver.current_url:
-            driver.get(TARGET_URL)
-            return
-        wait = WebDriverWait(driver, timeout)
-        # Điền email
-        try:
-            email_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
+        # Kiểm tra xem đã login chưa
+        if "accounts.google.com" in driver.current_url:
+            logger.info(f"Logging in with email: {email}")
+            
+            # Đợi và điền email
+            email_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']"))
+            )
             email_input.clear()
             email_input.send_keys(email)
-            time.sleep(1)
             email_input.send_keys(Keys.ENTER)
-            time.sleep(3)
-        except Exception as e:
-            logger.error(f"Failed to input email: {e}")
-            driver.save_screenshot(f"login_error_{email.replace('@', '_at_')}_email.png")
-            return
-        # Kiểm tra xem có cần nhập password không
-        try:
-            password_input = wait.until(
+            
+            # Đợi và điền password
+            password_input = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
             )
-            # Add explicit wait for element to be interactable
-            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='password']")))
+            password_input.clear()
+            password_input.send_keys(password)
+            password_input.send_keys(Keys.ENTER)
             
-            # Scroll into view and wait a moment
-            driver.execute_script("arguments[0].scrollIntoView(true);", password_input)
-            time.sleep(1)
+            # Đợi cho đến khi login thành công
+            WebDriverWait(driver, 30).until(
+                lambda d: "accounts.google.com" not in d.current_url
+            )
+            logger.info("Login successful")
             
-            # Try multiple times to interact with password field
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    password_input.click()
-                    time.sleep(0.5)
-                    password_input.clear()
-                    password_input.send_keys(password)
-                    time.sleep(1)
-                    password_input.send_keys(Keys.ENTER)
-                    break
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        raise e
-                    logger.warning(f"Attempt {attempt + 1} failed to input password, retrying...")
-                    time.sleep(2)
-            
-            # Wait longer after submitting password
-            time.sleep(5)
-        except Exception as e:
-            logger.error(f"Failed to input password: {e}")
-            driver.save_screenshot(f"login_error_{email.replace('@', '_at_')}_pw.png")
-            return
-        # Kiểm tra xem đã đăng nhập thành công chưa
-        try:
-            wait.until(lambda d: "accounts.google.com" not in d.current_url)
-            logger.info(f"Auto login for {email} successful!")
-            driver.get(TARGET_URL)
-            time.sleep(5)
-            # Kiểm tra đã vào đúng TARGET_URL chưa
-            if TARGET_URL.split("//",1)[-1].split("/",1)[0] in driver.current_url:
-                logger.info("Successfully navigated to TARGET_URL")
-            else:
-                logger.warning("Failed to navigate to TARGET_URL")
-                screenshot_path = f"notebooklm_navigation_error_{email.replace('@', '_at_')}.png"
-                driver.save_screenshot(screenshot_path)
-                logger.info(f"Saved navigation error screenshot to {screenshot_path}")
-        except Exception as e:
-            logger.error(f"Login verification failed for {email}: {e}")
-            try:
-                screenshot_path = f"login_error_{email.replace('@', '_at_')}.png"
-                driver.save_screenshot(screenshot_path)
-                logger.info(f"Saved error screenshot to {screenshot_path}")
-            except:
-                pass
     except Exception as e:
-        logger.error(f"Auto login failed for {email}: {e}")
-        try:
-            screenshot_path = f"login_error_{email.replace('@', '_at_')}.png"
-            driver.save_screenshot(screenshot_path)
-            logger.info(f"Saved error screenshot to {screenshot_path}")
-        except:
-            pass 
+        logger.error(f"Login error: {str(e)}")
+        # Lưu screenshot khi có lỗi
+        driver.save_screenshot(f"login_error_{email.replace('@', '_at_')}.png")
+        raise 

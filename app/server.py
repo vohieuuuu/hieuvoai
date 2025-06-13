@@ -82,17 +82,24 @@ def query_api():
     conversation_id = data.get("conversation_id")
     if not prompt:
         return jsonify(error="Empty prompt"), 400
+    
+    # Tạo query_id duy nhất cho mỗi request
+    query_id = f"{conversation_id}_{int(time.time())}"
+    
     # Nếu không có conversation_id, tạo mới
     new_conversation = False
     if not conversation_id:
         conversation_id = generate_conversation_id()
         new_conversation = True
+    
     # Lấy hoặc tạo driver cho conversation_id
     driver, email, password = get_driver_for_conversation(
         conversation_id, chrome_options_func, login_func=google_login_if_needed
     )
-    # Gửi prompt và lấy kết quả
-    answer = send_prompt_and_get_response(driver, prompt)
+    
+    # Gửi prompt và lấy kết quả với query_id
+    answer = send_prompt_and_get_response(driver, prompt, query_id)
+    
     response = {"answer": answer, "conversation_id": conversation_id, "email": email}
     if new_conversation:
         response["new_conversation"] = True
