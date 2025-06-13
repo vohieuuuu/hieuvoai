@@ -4,6 +4,11 @@ EMAIL_ACCOUNTS = [
     {"email": "pandorafq6441b111@nongbualoi.org", "password": "Anhtai777"},
     {"email": "peggienw7771b111@nongbualoi.org", "password": "Anhtai777"},
     {"email": "shirjd7431b111@nongbualoi.org", "password": "Anhtai777"},
+    {"email": "roseannpg6781b111@nongbualoi.org", "password": "Anhtai777"},
+    {"email": "risaak2781b111@nongbualoi.org", "password": "Anhtai777"},
+    {"email": "roseannlg6351b111@nongbualoi.org", "password": "Anhtai777"},
+    {"email": "paolinaom4671b111@nongbualoi.org", "password": "Anhtai777"},
+    {"email": "cynthielj6071b111@nongbualoi.org", "password": "Anhtai777"},
 ] 
 
 def chrome_options_func(profile_dir):

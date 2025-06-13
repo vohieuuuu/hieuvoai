@@ -4,13 +4,15 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, WebDriverException
 from .config import PROMPT_SELECTOR, LOADING_CSS, TIMEOUT, ELEMENT_WAIT_TIMEOUT, CAPTCHA_SELECTORS, TARGET_URL
 import logging
 import json
 import re
 from datetime import datetime
 from seleniumwire import webdriver
+from functools import wraps
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,26 @@ logger = logging.getLogger(__name__)
 PROMPT_SELECTOR = "textarea[placeholder='Message NotebookLM']"
 RESPONSE_SELECTOR = "div[data-message-author-role='model']"
 LOADING_SELECTOR = "div.loading-indicator"  # Thêm selector cho loading indicator
+MAX_RETRIES = 3
+RETRY_DELAY = 1
+
+def retry_on_failure(max_retries=MAX_RETRIES, delay=RETRY_DELAY):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"[RETRY] Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+            logger.error(f"[ERROR] All retry attempts failed: {str(last_exception)}")
+            raise last_exception
+        return wrapper
+    return decorator
 
 class ResponseTracker:
     def __init__(self):
@@ -25,21 +47,27 @@ class ResponseTracker:
         self.response_count = 0
         self.last_update = datetime.now()
         self.stable_count = 0
-        self.max_stable_count = 3  # Số lần response không đổi để xác định là ổn định
+        self.max_stable_count = 3  # Số lần response giống nhau để xác định ổn định
+        self.timeout = 30  # Timeout 30 giây
+        self.check_interval = 0.3  # Kiểm tra mỗi 0.3 giây
 
     def update(self, new_response):
+        now = datetime.now()
         if new_response != self.last_response:
             self.last_response = new_response
             self.response_count += 1
-            self.last_update = datetime.now()
+            self.last_update = now
             self.stable_count = 0
-            logger.info(f"[TRACKER] New response detected. Count: {self.response_count}")
+            return True
         else:
             self.stable_count += 1
-            logger.info(f"[TRACKER] Response unchanged. Stable count: {self.stable_count}")
+            return False
 
     def is_stable(self):
         return self.stable_count >= self.max_stable_count
+
+    def is_timeout(self):
+        return (datetime.now() - self.last_update).total_seconds() > self.timeout
 
     def get_response(self):
         return self.last_response
@@ -84,72 +112,75 @@ def get_message_elements(drv):
         logger.error(f"Error getting answer messages: {str(e)}")
         return []
 
-def wait_for_response(driver, timeout=15, tracker=None):
-    start_time = time.time()
-    last_response = None
-    stable_count = 0
-    max_stable_count = 3
-
-    while time.time() - start_time < timeout:
-        try:
-            responses = driver.find_elements(By.CSS_SELECTOR, RESPONSE_SELECTOR)
-            if responses:
-                current_response = responses[-1].text.strip()
-                if tracker:
-                    tracker.update(current_response)
-                    if tracker.is_stable():
-                        logger.info(f"[RESPONSE] Stable response found after {tracker.response_count} changes")
-                        return tracker.get_response()
-                else:
-                    if current_response == last_response:
-                        stable_count += 1
-                        if stable_count >= max_stable_count:
-                            logger.info(f"[RESPONSE] Stable response found after {stable_count} unchanged checks")
-                            return current_response
-                    else:
-                        stable_count = 0
-                        last_response = current_response
-            time.sleep(0.3)  # Giảm thời gian sleep để tăng tốc độ phản hồi
-        except Exception as e:
-            logger.error(f"[ERROR] Error while waiting for response: {str(e)}")
-            time.sleep(0.3)
-
-    logger.warning(f"[TIMEOUT] No stable response after {timeout} seconds")
-    return last_response if last_response else None
-
-def send_prompt_and_get_response(driver, prompt):
-    try:
-        logger.info(f"[PROMPT] Sending prompt: {prompt[:50]}...")
-        logger.info(f"[URL] Current URL: {driver.current_url}")
-
-        # Tạo tracker cho request này
+@retry_on_failure()
+def wait_for_response(driver, tracker=None):
+    if tracker is None:
         tracker = ResponseTracker()
+    
+    while not tracker.is_timeout():
+        try:
+            # Tìm tất cả các response
+            responses = driver.find_elements(By.CSS_SELECTOR, "div[data-message-author-role='model']")
+            if not responses:
+                time.sleep(tracker.check_interval)
+                continue
+            
+            # Lấy response mới nhất
+            latest_response = responses[-1].text.strip()
+            
+            # Cập nhật tracker
+            if tracker.update(latest_response):
+                logger.info(f"[RESPONSE] New response detected (count: {tracker.response_count})")
+            
+            # Kiểm tra nếu response đã ổn định
+            if tracker.is_stable():
+                logger.info(f"[RESPONSE] Response stabilized after {tracker.response_count} changes")
+                return latest_response
+            
+            time.sleep(tracker.check_interval)
+            
+        except WebDriverException as e:
+            logger.error(f"[RESPONSE] Error waiting for response: {str(e)}")
+            if tracker.is_timeout():
+                break
+            time.sleep(tracker.check_interval)
+    
+    if tracker.last_response:
+        logger.warning("[RESPONSE] Timeout reached, returning last known response")
+        return tracker.last_response
+    
+    raise TimeoutException("No response received within timeout period")
 
-        # Tìm và gửi prompt
-        box = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, PROMPT_SELECTOR))
+@retry_on_failure()
+def send_prompt_and_get_response(driver, question):
+    try:
+        # Tạo tracker mới cho mỗi request
+        tracker = ResponseTracker()
+        
+        # Tìm prompt box
+        prompt_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div[contenteditable='true']"))
         )
-        box.clear()
-        box.send_keys(prompt)
-        box.send_keys(Keys.ENTER)
-        logger.info("[PROMPT] Prompt sent successfully")
-
-        # Đợi và lấy response
+        
+        # Xóa nội dung cũ
+        prompt_box.clear()
+        
+        # Gửi câu hỏi
+        prompt_box.send_keys(question)
+        time.sleep(0.5)  # Đợi một chút để đảm bảo câu hỏi được gửi
+        prompt_box.send_keys(Keys.RETURN)
+        
+        # Đợi và lấy câu trả lời
         start_time = time.time()
-        response = wait_for_response(driver, timeout=15, tracker=tracker)
-        end_time = time.time()
-
-        if response:
-            logger.info(f"[RESPONSE] Got response in {end_time - start_time:.2f} seconds")
-            logger.info(f"[RESPONSE] Response length: {len(response)}")
-            return response
-        else:
-            logger.warning("[RESPONSE] No response received")
-            return None
-
+        response = wait_for_response(driver, tracker)
+        processing_time = time.time() - start_time
+        
+        logger.info(f"[RESPONSE] Got response in {processing_time:.2f}s after {tracker.response_count} changes")
+        return response
+        
     except Exception as e:
-        logger.error(f"[ERROR] Error in send_prompt_and_get_response: {str(e)}")
-        return None
+        logger.error(f"[ERROR] Failed to get response: {str(e)}")
+        raise
 
 def google_login_if_needed(driver, email, password):
     """Login vào Google nếu cần"""
