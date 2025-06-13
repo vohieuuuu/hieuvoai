@@ -10,6 +10,8 @@ from .selenium_worker import send_prompt_and_get_response, google_login_if_neede
 import logging
 import os
 import shutil
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -38,7 +40,10 @@ def chrome_options_func(profile_dir):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-software-rasterizer")
     # options.add_argument("--headless=new")  # Bật dòng này nếu muốn test headless
-    return options
+    
+    # Thêm service configuration
+    service = Service(ChromeDriverManager().install())
+    return options, service
 
 # Khởi tạo standby pool với login_func khi server khởi động
 _init_standby_pool(chrome_options_func, login_func=google_login_if_needed)

@@ -47,7 +47,7 @@ def chrome_options_func(profile_dir):
 def _create_entry(email, password, chrome_options_func, login_func=None, standby=False):
     profile_dir = os.path.join(PROFILE_BASE_DIR, email)
     os.makedirs(profile_dir, exist_ok=True)
-    options = chrome_options_func(profile_dir)
+    options, service = chrome_options_func(profile_dir)
     options.add_argument("--remote-debugging-port=0")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
@@ -63,7 +63,7 @@ def _create_entry(email, password, chrome_options_func, login_func=None, standby
     options.add_argument("--force-color-profile=srgb")
     options.add_argument("--metrics-recording-only")
     options.add_argument("--mute-audio")
-    service = Service(ChromeDriverManager().install())
+    
     driver = webdriver.Chrome(service=service, options=options)
     if login_func:
         driver.get("https://accounts.google.com/")
