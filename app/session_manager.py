@@ -64,6 +64,12 @@ def chrome_options_func(profile_dir):
     options.add_argument("--log-level=3")
     options.add_argument("--silent")
     options.add_argument("--window-size=300,300")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     return options
 
 def check_driver_health(driver):
@@ -77,15 +83,29 @@ def check_driver_health(driver):
 def _create_entry(email, password, chrome_options_func, login_func=None, standby=True):
     profile_dir = os.path.join(PROFILE_BASE_DIR, email)
     os.makedirs(profile_dir, exist_ok=True)
-    options = chrome_options_func(profile_dir)
+    result = chrome_options_func(profile_dir)
+    
+    # Xử lý cả hai trường hợp: tuple (options, service) hoặc chỉ options
+    if isinstance(result, tuple):
+        options, service = result
+    else:
+        options = result
+        service = None
     
     for attempt in range(MAX_RETRIES):
         try:
-            driver = uc.Chrome(
-                options=options,
-                driver_executable_path=ChromeDriverManager().install(),
-                version_main=None
-            )
+            if service:
+                driver = uc.Chrome(
+                    options=options,
+                    service=service,
+                    version_main=None
+                )
+            else:
+                driver = uc.Chrome(
+                    options=options,
+                    driver_executable_path=ChromeDriverManager().install(),
+                    version_main=None
+                )
             
             if login_func:
                 driver.get("https://accounts.google.com/")

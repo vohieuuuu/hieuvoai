@@ -80,11 +80,24 @@ def chrome_options_func(profile_dir):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     
-    # Sử dụng ChromeDriver từ thư mục .wdm
-    driver_path = os.path.join(os.environ['USERPROFILE'], '.wdm', 'drivers', 'chromedriver', 'win64', '137.0.7151.70', 'chromedriver-win32', 'chromedriver.exe')
-    service = Service(executable_path=driver_path)
+    try:
+        # Phương án 1: Sử dụng ChromeDriver từ thư mục .wdm
+        driver_path = os.path.join(os.environ['USERPROFILE'], '.wdm', 'drivers', 'chromedriver', 'win64', '137.0.7151.70', 'chromedriver-win32', 'chromedriver.exe')
+        if os.path.exists(driver_path):
+            service = Service(executable_path=driver_path)
+            return options, service
+    except Exception as e:
+        logger.warning(f"Failed to use local ChromeDriver: {str(e)}")
     
-    return options, service
+    # Phương án 2: Sử dụng ChromeDriverManager
+    try:
+        service = Service(ChromeDriverManager().install())
+        return options, service
+    except Exception as e:
+        logger.warning(f"Failed to use ChromeDriverManager: {str(e)}")
+    
+    # Phương án 3: Chỉ trả về options
+    return options
 
 # Khởi tạo standby pool với login_func khi server khởi động
 _init_standby_pool(chrome_options_func, login_func=google_login_if_needed)
